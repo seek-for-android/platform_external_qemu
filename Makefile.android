@@ -260,6 +260,8 @@ start-emulator64-program = \
 # A varient of end-emulator-library for host programs instead
 end-emulator-program = \
     $(eval LOCAL_LDLIBS += $(QEMU_SYSTEM_LDLIBS)) \
+    $(eval LOCAL_LDLIBS += -L$(PCSC$(LOCAL_MODULE_BITS)_LIBPATH) -lpcsclite) \
+    $(eval LOCAL_CFLAGS += -DENABLE_PCSC -I$(PCSC_INCPATH)) \
     $(eval $(end-emulator-module-ev)) \
     $(call include-if-bitness-$(LOCAL_MODULE_BITS), $(BUILD_HOST_EXECUTABLE))
 

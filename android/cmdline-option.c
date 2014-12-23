@@ -2,6 +2,7 @@
 #include "android/utils/debug.h"
 #include "android/utils/misc.h"
 #include "android/utils/system.h"
+#include "telephony/sim_card.c"
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
@@ -99,6 +100,20 @@ android_parse_options( int  *pargc, char**  *pargv, AndroidOptions*  opt )
             parse_debug_tags(*aread++);
             continue;
         }
+
+#if defined(ENABLE_PCSC)
+extern void parse_pcsc_options( const char* options );
+
+        if (!strcmp(arg, "pcsc")) {
+            if ((nargs > 0) && (**aread != '-')) {
+                nargs--;
+                parse_pcsc_options(*aread++);
+                continue;
+            }
+            parse_pcsc_options(NULL);
+            continue;
+        }
+#endif
 
         /* NOTE: variable tables map option names to values
          * (e.g. field offsets into the AndroidOptions structure).

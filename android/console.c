@@ -1544,6 +1544,29 @@ static const CommandDefRec  gsm_commands[] =
     { NULL, NULL, NULL, NULL, NULL, NULL }
 };
 
+static int
+do_sim_apdu( ControlClient  client, char*  args )
+{
+    char temp[1024];
+
+    if (!args) {
+        control_write( client, "KO: missing argument, try 'sim apdu <apdu>'\r\n" );
+        return -1;
+    }
+    sprintf( temp, "AT+CSIM=%d,\"%s\"", strlen(args), args );
+    amodem_send(android_modem, temp);
+    return 0;
+}
+
+
+static const CommandDefRec  sim_commands[] =
+{
+    { "apdu", "Send APDU to SIM",
+    "'sim apdu' Send APDU to SIM\r\n", NULL,
+    do_sim_apdu, NULL },
+    { NULL, NULL, NULL, NULL, NULL, NULL }
+};
+
 /********************************************************************************************/
 /********************************************************************************************/
 /*****                                                                                 ******/
@@ -2942,6 +2965,10 @@ static const CommandDefRec   main_commands[] =
     { "sensor", "manage emulator sensors",
       "allows you to request the emulator sensors\r\n", NULL,
       NULL, sensor_commands },
+
+    { "sim", "SIM related commands",
+      "allows you to send APDUs to the SIM\r\n", NULL,
+      NULL, sim_commands },
 
     { NULL, NULL, NULL, NULL, NULL, NULL }
 };
