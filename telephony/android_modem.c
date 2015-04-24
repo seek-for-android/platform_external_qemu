@@ -2439,6 +2439,7 @@ static const struct {
     { "!+CSIM=", NULL, handleSIM_APDU },
     { "!+CGLA=", NULL, handleSIM_APDU },
     { "!+CCHO=", NULL, handleSIM_APDU },
+    { "!+CCHP=", NULL, handleSIM_APDU },
     { "!+CCHC=", NULL, handleSIM_APDU },
     { "!+CATR", NULL, handleSIM_APDU },
 

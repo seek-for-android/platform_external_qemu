@@ -751,6 +751,7 @@ pcsc_asimcard_cmd( ASimCard  sim, const char*  cmd )
 {
     int clen, hChannel, iChannel;
     char command[1024];
+    char c_p2[1024];
 
     // transmit on basic channel:
     if ( sscanf(cmd, "+CSIM=%d,\"%[0-9a-fA-F]", &clen, command) == 2 ) {
@@ -905,6 +906,81 @@ pcsc_asimcard_cmd( ASimCard  sim, const char*  cmd )
             } else {
                 // open logical channel without AID:
                 sprintf(sim->out_buff, "+CCHO: %d", H_CHANNEL_OFFSET + iChannel);
+                return sim->out_buff;
+            }
+
+            // If something failed, close the channel
+            memcpy(bSendBuffer, "\x00\x70\x80\x00\x00", 5);
+            bSendBuffer[3] = iChannel;
+
+            len = sizeof(bRecvBuffer);
+            rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5,
+                    NULL, bRecvBuffer, &len);
+
+            return "+CME ERROR: NOT FOUND";
+        }
+        return "+CME ERROR: MEMORY FULL";
+    }
+
+// open logical channel with p2:
+    if (memcmp(cmd, "+CCHP=", 6) == 0 ) {
+        long rv;
+        DWORD len;
+
+        memcpy(bSendBuffer, "\x00\x70\x00\x00\x01", 5);
+
+        len = sizeof(bRecvBuffer);
+        rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5,
+                NULL, bRecvBuffer, &len);
+
+        if ((rv == SCARD_S_SUCCESS) && (len == 3) && (bRecvBuffer[0] > 0)) {
+            iChannel = bRecvBuffer[0];
+
+            // Check if cmd contains AID
+            if (sscanf(cmd, "+CCHP=%[0-9a-fA-F],%[0-9a-fA-F]", command, c_p2) == 2) {
+                // open logical channel with AID:
+                bSendBuffer[0] = (iChannel < 4) ? iChannel: 0x40 | (iChannel - 4);
+                memcpy(&bSendBuffer[1], "\xa4\x04", 2);
+                asimcard_str_to_bytearray(&bSendBuffer[3], c_p2);
+                bSendBuffer[4] = strlen(command) >> 1;
+                asimcard_str_to_bytearray(&bSendBuffer[5], command);
+
+                len = sizeof(bRecvBuffer);
+                rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer,
+                        bSendBuffer[4] + 5, NULL, bRecvBuffer, &len);
+                if (rv == SCARD_S_SUCCESS) {
+                    if ((len == 2) && (bRecvBuffer[0] == 0x61)) {
+                        // Send get response
+                        memcpy(&bSendBuffer[1], "\xc0\x00\x00", 3);
+                        bSendBuffer[4] = bRecvBuffer[1];
+                        len = sizeof(bRecvBuffer);
+                        rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5,
+                                NULL, bRecvBuffer, &len);
+                    } else if ((len == 2) && (bRecvBuffer[0] == 0x6C)) {
+                        // Resend the command with Le = SW2
+                        bSendBuffer[4] = bRecvBuffer[1];
+                        len = sizeof(bRecvBuffer);
+                        rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer,
+                                clen >> 1, NULL, bRecvBuffer, &len);
+                    }
+
+                    // Check if select command succeeded
+                    if (rv == SCARD_S_SUCCESS && len >= 2
+                            && (bRecvBuffer[len-2] == 0x90
+                                || bRecvBuffer[len-2] == 0x62
+                                || bRecvBuffer[len-2] == 0x63)) {
+                        // Resposne is "+CCHP: <channelId>,<select_resp[0]>,...,<select_resp[len-1]>
+                        sprintf(sim->out_buff, "+CCHP: %d", H_CHANNEL_OFFSET + iChannel);
+                        int i;
+                        for (i = 0; i < len; i++) {
+                            sprintf(&sim->out_buff[strlen(sim->out_buff)], ", %d", (int) bRecvBuffer[i]);
+                        }
+                        return sim->out_buff;
+                    }
+                 }
+            } else {
+                // open logical channel without AID:
+                sprintf(sim->out_buff, "+CCHP: %d", H_CHANNEL_OFFSET + iChannel);
                 return sim->out_buff;
             }
 
