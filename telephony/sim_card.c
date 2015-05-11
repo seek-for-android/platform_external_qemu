@@ -903,12 +903,128 @@ static long pcsc_asimcard_close_logical_channel(ASimCard sim, int channel)
     return 0;
 }
 
+/**
+ * Opens a logical channel and stores the response in sim->out_buff.
+ * In case of success, response it is stored at the end of the existing string so calling method can
+ * set the name of the AT method at the beggining of sim->out_buff..
+ *
+ * @param sim The ASimCard object to be used.
+ * @param aid The aid to which the channel shall be opened.
+ * @param aidLength The length of the AID.
+ * @param p2 The P2 parameter to be used in the SELECT command.
+ */
+static void
+pcsc_asimcard_open_logical_channel(ASimCard sim, const char *aid, char p2)
+{
+    long rv;
+    unsigned char cmdApdu[400];
+    unsigned char responseApdu[400];
+    int iChannel;
+
+    memcpy(cmdApdu, "\x00\x70\x00\x00\x01", 5);
+    rv = pcsc_asimcard_transcieve_apdu(sim, cmdApdu, 5, responseApdu, sizeof(responseApdu));
+    if (rv < 0)
+    {
+        if (rv == -1)
+        {
+            sprintf(sim->out_buff, "+CME ERROR: SIM FAILURE");
+            return;
+        }
+        else if (rv == -2)
+        {
+            sprintf(sim->out_buff, "+CME ERROR: NOT ENOUGH MEMORY SPACE");
+            return;
+        }
+        else
+        {
+            sprintf(sim->out_buff, "+CME ERROR: UNEXPECTED FAILURE");
+            return;
+        }
+    }
+
+    unsigned char sw1 = responseApdu[rv - 2];
+    unsigned char sw2 = responseApdu[rv - 1];
+    if (rv != 3 || responseApdu[0] <= 0)
+    {
+        // MANAGE CHANNEL (Open) failed
+        sprintf(sim->out_buff, "+CME ERROR: MEMORY FULL");
+        return;
+    }
+
+    iChannel = responseApdu[0];
+
+    if (strlen(aid) > 0)
+    {
+        // Send a SELECT by AID command
+        // Form command:
+        memcpy(cmdApdu, "\x00\xA4\x04\x00", 3);
+        // Set CLA byte
+        if (iChannel < 4)
+        {
+            cmdApdu[0] = iChannel;
+        }
+        else
+        {
+            cmdApdu[0] = 0x40 | (iChannel - 4);
+        }
+        // Set P2 byte
+        cmdApdu[3] = p2;
+        // Set Lc byte
+        cmdApdu[4] = strlen(aid) >> 1;
+        asimcard_str_to_bytearray(&cmdApdu[5], aid);
+
+        // Send the command:
+        rv = pcsc_asimcard_transcieve_apdu(sim, cmdApdu, 5 + cmdApdu[4], responseApdu, sizeof(responseApdu));
+        if (rv < 0)
+        {
+            pcsc_asimcard_close_logical_channel(sim, iChannel);
+            if (rv == -1)
+            {
+                sprintf(sim->out_buff, "+CME ERROR: SIM FAILURE");
+                return;
+            }
+            else if (rv == -2)
+            {
+                sprintf(sim->out_buff, "+CME ERROR: NOT ENOUGH MEMORY SPACE");
+                return;
+            }
+            else
+            {
+                sprintf(sim->out_buff, "+CME ERROR: UNEXPECTED FAILURE");
+                return;
+            }
+        }
+
+        sw1 = responseApdu[rv - 2];
+        sw2 = responseApdu[rv - 1];
+        // Check if select command succeeded
+        if (!(sw1 == 0x90 && sw2 == 0x00) && !(sw1 == 0x62) && !(sw1 == 0x63))
+        {
+            // Something failed, close the channel
+            pcsc_asimcard_close_logical_channel(sim, iChannel);
+            sprintf(sim->out_buff, "+CME ERROR: NOT FOUND");
+            return;
+        }
+    }
+
+    // Form response:
+    // Write the channel number in the out buffer
+    sprintf(&sim->out_buff[strlen(sim->out_buff)], "%d", H_CHANNEL_OFFSET + iChannel);
+    if (strlen(aid) > 0)
+    {
+        // If SELECT cmd was sent, add the select response
+        int i;
+        for (i = 0; i < rv; i++) {
+            sprintf(&sim->out_buff[strlen(sim->out_buff)], ", %d", (int) responseApdu[i]);
+        }
+    }
+}
+
 static const char*
 pcsc_asimcard_cmd( ASimCard  sim, const char*  cmd )
 {
     int clen, hChannel, iChannel;
     char command[1024];
-    char c_p2[1024];
 
     // transmit on basic channel:
     if (sscanf(cmd, "+CSIM=%d,\"%[0-9a-fA-F]", &clen, command) == 2) {
@@ -938,151 +1054,33 @@ pcsc_asimcard_cmd( ASimCard  sim, const char*  cmd )
 
     // open logical channel:
     if (memcmp(cmd, "+CCHO=", 6) == 0 ) {
-        long rv;
-        DWORD len;
-
-        memcpy(bSendBuffer, "\x00\x70\x00\x00\x01", 5);
-
-        len = sizeof(bRecvBuffer);
-        rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5,
-                NULL, bRecvBuffer, &len);
-
-        if ((rv == SCARD_S_SUCCESS) && (len == 3) && (bRecvBuffer[0] > 0)) {
-            iChannel = bRecvBuffer[0];
-
-            // Check if cmd contains AID
-            if (sscanf(cmd, "+CCHO=\"%[0-9a-fA-F]", command) == 1) {
-                // open logical channel with AID:
-                bSendBuffer[0] = (iChannel < 4) ? iChannel: 0x40 | (iChannel - 4);
-                memcpy(&bSendBuffer[1], "\xa4\x04\x00", 3);
-                bSendBuffer[4] = strlen(command) >> 1;
-                asimcard_str_to_bytearray(&bSendBuffer[5], command);
-
-                len = sizeof(bRecvBuffer);
-                rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer,
-                        bSendBuffer[4] + 5, NULL, bRecvBuffer, &len);
-                if (rv == SCARD_S_SUCCESS) {
-                    if ((len == 2) && (bRecvBuffer[0] == 0x61)) {
-                        // Send get response
-                        memcpy(&bSendBuffer[1], "\xc0\x00\x00", 3);
-                        bSendBuffer[4] = bRecvBuffer[1];
-                        len = sizeof(bRecvBuffer);
-                        rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5,
-                                NULL, bRecvBuffer, &len);
-                    } else if ((len == 2) && (bRecvBuffer[0] == 0x6C)) {
-                        // Resend the command with Le = SW2
-                        bSendBuffer[4] = bRecvBuffer[1];
-                        len = sizeof(bRecvBuffer);
-                        rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer,
-                                clen >> 1, NULL, bRecvBuffer, &len);
-                    }
-
-                    // Check if select command succeeded
-                    if (rv == SCARD_S_SUCCESS && len >= 2
-                            && (bRecvBuffer[len-2] == 0x90
-                                || bRecvBuffer[len-2] == 0x62
-                                || bRecvBuffer[len-2] == 0x63)) {
-                        // Resposne is "+CCHO: <channelId>,<select_resp[0]>,...,<select_resp[len-1]>
-                        sprintf(sim->out_buff, "+CCHO: %d", H_CHANNEL_OFFSET + iChannel);
-                        int i;
-                        for (i = 0; i < len; i++) {
-                            sprintf(&sim->out_buff[strlen(sim->out_buff)], ", %d", (int) bRecvBuffer[i]);
-                        }
-                        return sim->out_buff;
-                    }
-                 }
-            } else {
-                // open logical channel without AID:
-                sprintf(sim->out_buff, "+CCHO: %d", H_CHANNEL_OFFSET + iChannel);
-                return sim->out_buff;
-            }
-
-            // If something failed, close the channel
-            memcpy(bSendBuffer, "\x00\x70\x80\x00\x00", 5);
-            bSendBuffer[3] = iChannel;
-
-            len = sizeof(bRecvBuffer);
-            rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5,
-                    NULL, bRecvBuffer, &len);
-
-            return "+CME ERROR: NOT FOUND";
+        sprintf(sim->out_buff, "+CCHO: ");
+        char *aid;
+        if (sscanf(cmd, "+CCHO=\"%[0-9a-fA-F]", command) == 1) {
+            aid = command;
         }
-        return "+CME ERROR: MEMORY FULL";
+        else {
+            aid = "";
+        }
+        pcsc_asimcard_open_logical_channel(sim, aid, 0x00);
+        return sim->out_buff;
     }
 
-// open logical channel with p2:
+    // open logical channel with P2:
     if (memcmp(cmd, "+CCHP=", 6) == 0 ) {
-        long rv;
-        DWORD len;
-
-        memcpy(bSendBuffer, "\x00\x70\x00\x00\x01", 5);
-
-        len = sizeof(bRecvBuffer);
-        rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5,
-                NULL, bRecvBuffer, &len);
-
-        if ((rv == SCARD_S_SUCCESS) && (len == 3) && (bRecvBuffer[0] > 0)) {
-            iChannel = bRecvBuffer[0];
-
-            // Check if cmd contains AID
-            if (sscanf(cmd, "+CCHP=%[0-9a-fA-F],%[0-9a-fA-F]", command, c_p2) == 2) {
-                // open logical channel with AID:
-                bSendBuffer[0] = (iChannel < 4) ? iChannel: 0x40 | (iChannel - 4);
-                memcpy(&bSendBuffer[1], "\xa4\x04", 2);
-                asimcard_str_to_bytearray(&bSendBuffer[3], c_p2);
-                bSendBuffer[4] = strlen(command) >> 1;
-                asimcard_str_to_bytearray(&bSendBuffer[5], command);
-
-                len = sizeof(bRecvBuffer);
-                rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer,
-                        bSendBuffer[4] + 5, NULL, bRecvBuffer, &len);
-                if (rv == SCARD_S_SUCCESS) {
-                    if ((len == 2) && (bRecvBuffer[0] == 0x61)) {
-                        // Send get response
-                        memcpy(&bSendBuffer[1], "\xc0\x00\x00", 3);
-                        bSendBuffer[4] = bRecvBuffer[1];
-                        len = sizeof(bRecvBuffer);
-                        rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5,
-                                NULL, bRecvBuffer, &len);
-                    } else if ((len == 2) && (bRecvBuffer[0] == 0x6C)) {
-                        // Resend the command with Le = SW2
-                        bSendBuffer[4] = bRecvBuffer[1];
-                        len = sizeof(bRecvBuffer);
-                        rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer,
-                                clen >> 1, NULL, bRecvBuffer, &len);
-                    }
-
-                    // Check if select command succeeded
-                    if (rv == SCARD_S_SUCCESS && len >= 2
-                            && (bRecvBuffer[len-2] == 0x90
-                                || bRecvBuffer[len-2] == 0x62
-                                || bRecvBuffer[len-2] == 0x63)) {
-                        // Resposne is "+CCHP: <channelId>,<select_resp[0]>,...,<select_resp[len-1]>
-                        sprintf(sim->out_buff, "+CCHP: %d", H_CHANNEL_OFFSET + iChannel);
-                        int i;
-                        for (i = 0; i < len; i++) {
-                            sprintf(&sim->out_buff[strlen(sim->out_buff)], ", %d", (int) bRecvBuffer[i]);
-                        }
-                        return sim->out_buff;
-                    }
-                 }
-            } else {
-                // open logical channel without AID:
-                sprintf(sim->out_buff, "+CCHP: %d", H_CHANNEL_OFFSET + iChannel);
-                return sim->out_buff;
-            }
-
-            // If something failed, close the channel
-            memcpy(bSendBuffer, "\x00\x70\x80\x00\x00", 5);
-            bSendBuffer[3] = iChannel;
-
-            len = sizeof(bRecvBuffer);
-            rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5,
-                    NULL, bRecvBuffer, &len);
-
-            return "+CME ERROR: NOT FOUND";
+        sprintf(sim->out_buff, "+CCHP: ");
+        char *aid;
+        char str_p2[10];
+        if (sscanf(cmd, "+CCHP=%[0-9a-fA-F],%[0-9a-fA-F]", command, str_p2) == 2) {
+            aid = command;
         }
-        return "+CME ERROR: MEMORY FULL";
+        else {
+            aid = "";
+        }
+        char p2;
+        asimcard_str_to_bytearray(&p2, str_p2);
+        pcsc_asimcard_open_logical_channel(sim, aid, p2);
+        return sim->out_buff;
     }
 
     // close logical channel:
