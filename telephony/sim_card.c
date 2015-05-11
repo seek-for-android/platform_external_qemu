@@ -746,6 +746,72 @@ asimcard_str_to_bytearray( unsigned char b[], char *s )
     }
 }
 
+static int
+pcsc_asimcard_transcieve_apdu(
+            ASimCard sim,
+            unsigned char* cmdApdu,
+            int cmdLength,
+            unsigned char* responseApdu,
+            int responseLength)
+{
+    memcpy(bSendBuffer, cmdApdu, cmdLength);
+    DWORD len = sizeof(bRecvBuffer);
+    long rc = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, cmdLength, NULL, bRecvBuffer, &len);
+    if (rc != SCARD_S_SUCCESS || len < 2)
+    {
+        return -1;
+    }
+
+    unsigned char sw1 = bRecvBuffer[len - 2];
+    unsigned char sw2 = bRecvBuffer[len - 1];
+    int pos = 0;
+    if (sw1 == 0x6C) {
+        // Resend the same command with Le = SW2
+        bSendBuffer[4] = bRecvBuffer[1];
+        len = sizeof(bRecvBuffer);
+        rc = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, cmdLength, NULL, bRecvBuffer, &len);
+        if (rc != SCARD_S_SUCCESS || len < 2)
+        {
+            return -1;
+        }
+        sw1 = bRecvBuffer[len - 2];
+        sw2 = bRecvBuffer[len - 1];
+    }
+    while (sw1 == 0x61 || sw2 == 0x9F)
+    {
+        if (len > 2)
+        {
+            // There is data, so save it in return buffer (except SW)
+            if (pos + len > responseLength)
+            {
+                // Not enough space in responseApdu buffer to store data
+                return -2;
+            }
+            memcpy(&responseApdu[pos], bRecvBuffer, len - 2);
+            pos += (len - 2);
+        }
+        // Send a GET RESPONSE command with Le = SW2
+        memcpy(&bSendBuffer[1], "\xC0\x00\x00", 3);
+        bSendBuffer[4] = sw2;
+        len = sizeof(bRecvBuffer);
+        rc = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5, NULL, bRecvBuffer, &len);
+        if (rc != SCARD_S_SUCCESS || len < 2)
+        {
+            return -1;
+        }
+        sw1 = bRecvBuffer[len - 2];
+        sw2 = bRecvBuffer[len - 1];
+    }
+
+    if (pos + len > responseLength)
+    {
+        return -2;
+    }
+    memcpy(&responseApdu[pos], bRecvBuffer, len);
+    pos += len;
+    return pos;
+}
+
 static const char*
 pcsc_asimcard_cmd( ASimCard  sim, const char*  cmd )
 {
@@ -794,58 +860,54 @@ pcsc_asimcard_cmd( ASimCard  sim, const char*  cmd )
     }
 
     // transmit on logical channel:
-    if ( sscanf(cmd, "+CGLA=%d,%d,\"%[0-9a-fA-F]", &hChannel, &clen, command) == 3 ) {
+    if (sscanf(cmd, "+CGLA=%d,%d,\"%[0-9a-fA-F]", &hChannel, &clen, command) == 3)
+    {
         long rv;
         DWORD len;
 
         iChannel = hChannel - H_CHANNEL_OFFSET;
-        if(iChannel <= 0  || iChannel >= MAX_N_CHANNELS)
-            return "+CME ERROR: INCORRECT PARAMETERS";
+        if (iChannel <= 0  || iChannel >= MAX_N_CHANNELS)
+        {
+            return "+CGLA ERROR: INCORRECT PARAMETERS";
+        }
 
-        if ( (strlen(command) != clen) || (((clen >> 1) << 1) != clen) )
-            return "ERROR: BAD COMMAND";
+        if ((strlen(command) != clen) || (((clen >> 1) << 1) != clen))
+        {
+            return "+CGLA ERROR: BAD COMMAND";
+        }
 
-        asimcard_str_to_bytearray(bSendBuffer, command);
+        unsigned char cmdApdu[clen >> 1];
+        unsigned char responseApdu[400];
+        asimcard_str_to_bytearray(cmdApdu, command);
 
         if (iChannel < 4) {
-            bSendBuffer[0] &= 0xfc;
-            bSendBuffer[0] |= iChannel;
+            cmdApdu[0] &= 0xFC;
+            cmdApdu[0] |= iChannel;
         }
         else {
-            bSendBuffer[0] &= 0xf0;
-            bSendBuffer[0] |= 0x40 | (iChannel - 4);
+            cmdApdu[0] &= 0xF0;
+            cmdApdu[0] |= 0x40 | (iChannel - 4);
         }
 
-        len = sizeof(bRecvBuffer);
-        rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, clen >> 1,
-                NULL, bRecvBuffer, &len);
-        if((rv == SCARD_S_SUCCESS) && (len >= 2)) {
-            // TODO: study why we need to control SW here.
-            if(len == 2) {
-                if((bRecvBuffer[0] == 0x61) || (bRecvBuffer[0] == 0x9f)) {
-                    memcpy(&bSendBuffer[1], "\xc0\x00\x00", 3);
-                    bSendBuffer[4] = bRecvBuffer[1];
-
-                    len = sizeof(bRecvBuffer);
-                    rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5,
-                          NULL, bRecvBuffer, &len);
-                }
-                else if(bRecvBuffer[0] == 0x6c) {
-                    bSendBuffer[4] = bRecvBuffer[1];
-                    len = sizeof(bRecvBuffer);
-                    rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer,
-                          clen >> 1, NULL, bRecvBuffer, &len);
-                }
+        rv = pcsc_asimcard_transcieve_apdu(sim, cmdApdu, sizeof(cmdApdu), responseApdu, sizeof(responseApdu));
+        if (rv < 0)
+        {
+            if (rv == -1)
+            {
+                return "+CGLA ERROR: SIM FAILURE";
             }
-
-            if((rv == SCARD_S_SUCCESS) && (len >= 2)) {
-                sprintf(sim->out_buff, "+CGLA: %d,", (int)len << 1);
-                asimcard_bytearray_to_str(&sim->out_buff[strlen(sim->out_buff)],
-                      bRecvBuffer, len);
-                return sim->out_buff;
+            else if (rv == -2)
+            {
+                return "+CGLA ERROR: NOT ENOUGH MEMORY SPACE";
+            }
+            else
+            {
+                return "+CGLA ERROR: UNEXPECTED FAILURE";
             }
         }
-        return "+CME ERROR: SIM FAILURE";
+        sprintf(sim->out_buff, "+CGLA: %d,", (int) rv << 1);
+        asimcard_bytearray_to_str(&sim->out_buff[strlen(sim->out_buff)], responseApdu, rv);
+        return sim->out_buff;
     }
 
     // open logical channel:
