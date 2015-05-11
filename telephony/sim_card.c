@@ -13,13 +13,14 @@
 #include <string.h>
 #include <assert.h>
 #include <stdio.h>
+#include <stdbool.h>
 #if defined(ENABLE_PCSC)
 #if ! defined(_WIN32)
 #include "pcsclite.h"
 #include "wintypes.h"
 #else
 #define WINSCARDDATA
-#define MAX_BUFFER_SIZE	264
+#define MAX_BUFFER_SIZE 264
 #endif
 #include "winscard.h"
 #include <stdio.h>
@@ -37,6 +38,7 @@
 
 #define MAX_N_CHANNELS 20
 #define H_CHANNEL_OFFSET 0x12345600
+#define MAX_APDU_LENGTH 0xFFFF + 10
 
 typedef struct ASimCardRec_ {
     ASimStatus  status;
@@ -45,7 +47,7 @@ typedef struct ASimCardRec_ {
     int         pin_retries;
     int         port;
 
-    char        out_buff[ 1024 ];
+    char        out_buff[2 * MAX_APDU_LENGTH];
     int         out_size;
 
 #if defined(ENABLE_PCSC)
@@ -746,6 +748,12 @@ asimcard_str_to_bytearray( unsigned char b[], char *s )
     }
 }
 
+static bool
+pcsc_asimcard_is_extended_length_apdu(unsigned char* cmdApdu, int cmdApduLength)
+{
+    return cmdApduLength > 5 && cmdApdu[4] == 0x00;
+}
+
 static int
 pcsc_asimcard_transcieve_apdu(
             ASimCard sim,
@@ -754,16 +762,62 @@ pcsc_asimcard_transcieve_apdu(
             unsigned char* responseApdu,
             int responseLength)
 {
-    memcpy(bSendBuffer, cmdApdu, cmdLength);
-    DWORD len = sizeof(bRecvBuffer);
-    long rc = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, cmdLength, NULL, bRecvBuffer, &len);
-    if (rc != SCARD_S_SUCCESS || len < 2)
+    DWORD len;
+    long rc;
+    unsigned char sw1, sw2;
+
+    if (!pcsc_asimcard_is_extended_length_apdu(cmdApdu, cmdLength))
     {
-        return -1;
+        memcpy(bSendBuffer, cmdApdu, cmdLength);
+        len = sizeof(bRecvBuffer);
+        rc = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, cmdLength, NULL, bRecvBuffer, &len);
+        if (rc != SCARD_S_SUCCESS || len < 2)
+        {
+            return -1;
+        }
+    }
+    else
+    {
+        // Send extended length APDU, wrap APDU in ENVELOPE commands
+        // TODO: channel number should be demasked from original cmd to form CLA byte
+        bSendBuffer[0] = cmdApdu[0];
+        memcpy(&bSendBuffer[1], "\xC2\x00\x00", 3);
+        int remainingBytes = cmdLength;
+        while (remainingBytes > 0)
+        {
+            int bytesToSend = remainingBytes;
+            if (bytesToSend > 0xFF)
+            {
+                bytesToSend = 0xFF;
+            }
+            bSendBuffer[4] = bytesToSend;
+            int offset = cmdLength - remainingBytes;
+            memcpy(&bSendBuffer[5], &cmdApdu[offset], bytesToSend);
+            len = sizeof(bRecvBuffer);
+            rc = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5 + bytesToSend, NULL, bRecvBuffer, &len);
+            if (rc != SCARD_S_SUCCESS || len < 2)
+            {
+                return -1;
+            }
+            sw1 = bRecvBuffer[len - 2];
+            sw2 = bRecvBuffer[len - 1];
+            if (sw1 != 0x90 || sw2 != 0x00)
+            {
+                return -1;
+            }
+            remainingBytes -= bytesToSend;
+        }
+        bSendBuffer[4] = 0x00;
+        len = sizeof(bRecvBuffer);
+        rc = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5, NULL, bRecvBuffer, &len);
+        if (rc != SCARD_S_SUCCESS || len < 2)
+        {
+            return -1;
+        }
     }
 
-    unsigned char sw1 = bRecvBuffer[len - 2];
-    unsigned char sw2 = bRecvBuffer[len - 1];
+    sw1 = bRecvBuffer[len - 2];
+    sw2 = bRecvBuffer[len - 1];
     int pos = 0;
     if (sw1 == 0x6C) {
         // Resend the same command with Le = SW2
@@ -824,8 +878,8 @@ pcsc_asimcard_transcieve_apdu(
 static void
 pcsc_asimcard_transcieve_apdu_wrapper(ASimCard sim, char *command, int clen, int channel, const char* outBuf)
 {
-    unsigned char cmdApdu[400];
-    unsigned char responseApdu[400];
+    unsigned char cmdApdu[MAX_APDU_LENGTH];
+    unsigned char responseApdu[MAX_APDU_LENGTH];
     long rv;
     DWORD len;
 
@@ -917,8 +971,8 @@ static void
 pcsc_asimcard_open_logical_channel(ASimCard sim, const char *aid, char p2)
 {
     long rv;
-    unsigned char cmdApdu[400];
-    unsigned char responseApdu[400];
+    unsigned char cmdApdu[21];
+    unsigned char responseApdu[MAX_APDU_LENGTH];
     int iChannel;
 
     memcpy(cmdApdu, "\x00\x70\x00\x00\x01", 5);
@@ -1024,7 +1078,7 @@ static const char*
 pcsc_asimcard_cmd( ASimCard  sim, const char*  cmd )
 {
     int clen, hChannel, iChannel;
-    char command[1024];
+    char command[MAX_APDU_LENGTH * 2];
 
     // transmit on basic channel:
     if (sscanf(cmd, "+CSIM=%d,\"%[0-9a-fA-F]", &clen, command) == 2) {
