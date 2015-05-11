@@ -812,6 +812,69 @@ pcsc_asimcard_transcieve_apdu(
     return pos;
 }
 
+/**
+ * Wrapper for using pcsc_asimcard_transcieve_apdu withoud need to parse all params.
+ *
+ * @param sim The ASimCard object.
+ * @param command A pointer to the command to be transmitted (as a string).
+ * @param clen The length of the command to be transmitted.
+ * @param channel The channel over which the APDU shall be transmitted.
+ * @param outBuf The buffer where the response shall be stored (initialize with <+CSIM: > or <+CGLA: >).
+ */
+static void
+pcsc_asimcard_transcieve_apdu_wrapper(ASimCard sim, char *command, int clen, int channel, const char* outBuf)
+{
+    unsigned char cmdApdu[400];
+    unsigned char responseApdu[400];
+    long rv;
+    DWORD len;
+
+    if ((strlen(command) != clen) || (((clen >> 1) << 1) != clen))
+    {
+        sprintf(outBuf, "ERROR: BAD COMMAND");
+        return;
+    }
+
+    if (channel < 0  || channel >= MAX_N_CHANNELS)
+    {
+        sprintf(outBuf, "ERROR: INVALID CHANNEL (%d)", channel);
+        return;
+    }
+
+    asimcard_str_to_bytearray(cmdApdu, command);
+
+    if (channel < 4) {
+        cmdApdu[0] &= 0xFC;
+        cmdApdu[0] |= channel;
+    }
+    else {
+        cmdApdu[0] &= 0xF0;
+        cmdApdu[0] |= 0x40 | (channel - 4);
+    }
+
+    rv = pcsc_asimcard_transcieve_apdu(sim, cmdApdu, clen >> 1, responseApdu, sizeof(responseApdu));
+    if (rv < 0)
+    {
+        if (rv == -1)
+        {
+            sprintf(outBuf, "ERROR: SIM FAILURE");
+            return;
+        }
+        else if (rv == -2)
+        {
+            sprintf(outBuf, "ERROR: NOT ENOUGH MEMORY SPACE");
+            return;
+        }
+        else
+        {
+            sprintf(outBuf, "ERROR: UNEXPECTED FAILURE");
+            return;
+        }
+    }
+    sprintf(outBuf, "%d,", (int) rv << 1);
+    asimcard_bytearray_to_str(&outBuf[strlen(outBuf)], responseApdu, rv);
+}
+
 static const char*
 pcsc_asimcard_cmd( ASimCard  sim, const char*  cmd )
 {
@@ -820,93 +883,28 @@ pcsc_asimcard_cmd( ASimCard  sim, const char*  cmd )
     char c_p2[1024];
 
     // transmit on basic channel:
-    if ( sscanf(cmd, "+CSIM=%d,\"%[0-9a-fA-F]", &clen, command) == 2 ) {
-        long rv;
-        DWORD len;
-
-        if ( (strlen(command) != clen) || (((clen >> 1) << 1) != clen) )
-            return "ERROR: BAD COMMAND";
-
-        asimcard_str_to_bytearray(bSendBuffer, command);
-
-        len = sizeof(bRecvBuffer);
-        rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, clen >> 1,
-                NULL, bRecvBuffer, &len);
-        if((rv == SCARD_S_SUCCESS) && (len >= 2)) {
-            // TODO: study why we need to control SW here.
-            if(len == 2) {
-                if((bRecvBuffer[0] == 0x61) || (bRecvBuffer[0] == 0x9f)) {
-                    memcpy(&bSendBuffer[1], "\xc0\x00\x00", 3);
-                    bSendBuffer[4] = bRecvBuffer[1];
-                    len = sizeof(bRecvBuffer);
-                    rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5,
-                              NULL, bRecvBuffer, &len);
-                } else
-                if(bRecvBuffer[0] == 0x6c) {
-                    bSendBuffer[4] = bRecvBuffer[1];
-                    len = sizeof(bRecvBuffer);
-                    rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer,
-                            clen >> 1, NULL, bRecvBuffer, &len);
-                }
-            }
-            if((rv == SCARD_S_SUCCESS) && (len >= 2)) {
-                sprintf(sim->out_buff, "+CSIM: %d,", (int)len << 1);
-                asimcard_bytearray_to_str(&sim->out_buff[strlen(sim->out_buff)],
-                        bRecvBuffer, len);
-                return sim->out_buff;
-            }
-        }
-        return "+CME ERROR: SIM FAILURE";
+    if (sscanf(cmd, "+CSIM=%d,\"%[0-9a-fA-F]", &clen, command) == 2) {
+        sprintf(sim->out_buff, "+CSIM: ");
+        pcsc_asimcard_transcieve_apdu_wrapper(
+                    sim,
+                    command,
+                    clen,
+                    0,
+                    &sim->out_buff[strlen(sim->out_buff)]);
+        return sim->out_buff;
     }
 
     // transmit on logical channel:
     if (sscanf(cmd, "+CGLA=%d,%d,\"%[0-9a-fA-F]", &hChannel, &clen, command) == 3)
     {
-        long rv;
-        DWORD len;
-
+        sprintf(sim->out_buff, "+CGLA: ");
         iChannel = hChannel - H_CHANNEL_OFFSET;
-        if (iChannel <= 0  || iChannel >= MAX_N_CHANNELS)
-        {
-            return "+CGLA ERROR: INCORRECT PARAMETERS";
-        }
-
-        if ((strlen(command) != clen) || (((clen >> 1) << 1) != clen))
-        {
-            return "+CGLA ERROR: BAD COMMAND";
-        }
-
-        unsigned char cmdApdu[clen >> 1];
-        unsigned char responseApdu[400];
-        asimcard_str_to_bytearray(cmdApdu, command);
-
-        if (iChannel < 4) {
-            cmdApdu[0] &= 0xFC;
-            cmdApdu[0] |= iChannel;
-        }
-        else {
-            cmdApdu[0] &= 0xF0;
-            cmdApdu[0] |= 0x40 | (iChannel - 4);
-        }
-
-        rv = pcsc_asimcard_transcieve_apdu(sim, cmdApdu, sizeof(cmdApdu), responseApdu, sizeof(responseApdu));
-        if (rv < 0)
-        {
-            if (rv == -1)
-            {
-                return "+CGLA ERROR: SIM FAILURE";
-            }
-            else if (rv == -2)
-            {
-                return "+CGLA ERROR: NOT ENOUGH MEMORY SPACE";
-            }
-            else
-            {
-                return "+CGLA ERROR: UNEXPECTED FAILURE";
-            }
-        }
-        sprintf(sim->out_buff, "+CGLA: %d,", (int) rv << 1);
-        asimcard_bytearray_to_str(&sim->out_buff[strlen(sim->out_buff)], responseApdu, rv);
+        pcsc_asimcard_transcieve_apdu_wrapper(
+                    sim,
+                    command,
+                    clen,
+                    iChannel,
+                    &sim->out_buff[strlen(sim->out_buff)]);
         return sim->out_buff;
     }
 
