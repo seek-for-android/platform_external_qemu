@@ -815,7 +815,7 @@ pcsc_asimcard_transcieve_apdu(
 /**
  * Wrapper for using pcsc_asimcard_transcieve_apdu withoud need to parse all params.
  *
- * @param sim The ASimCard object.
+ * @param sim The ASimCard object to be used.
  * @param command A pointer to the command to be transmitted (as a string).
  * @param clen The length of the command to be transmitted.
  * @param channel The channel over which the APDU shall be transmitted.
@@ -873,6 +873,34 @@ pcsc_asimcard_transcieve_apdu_wrapper(ASimCard sim, char *command, int clen, int
     }
     sprintf(outBuf, "%d,", (int) rv << 1);
     asimcard_bytearray_to_str(&outBuf[strlen(outBuf)], responseApdu, rv);
+}
+
+/**
+ * Closes a logical channel.
+ *
+ * @param sim The ASimCard object to be used.
+ * @param channel The channel to be closed.
+ *
+ * @return 0 if close succeeded, <0 otherwise.
+ */
+static long pcsc_asimcard_close_logical_channel(ASimCard sim, int channel)
+{
+    unsigned char cmdApdu[5];
+    unsigned char responseApdu[2];
+    memcpy(cmdApdu, "\x00\x70\x80\x00\x00", 5);
+    cmdApdu[3] = channel;
+    long rv = pcsc_asimcard_transcieve_apdu(sim, cmdApdu, 5, responseApdu, sizeof(responseApdu));
+    if (rv != 2)
+    {
+        return -1;
+    }
+    unsigned char sw1 = responseApdu[rv - 2];
+    unsigned char sw2 = responseApdu[rv - 1];
+    if (sw1 != 0x90 || sw2 != 0x00)
+    {
+        return -1;
+    }
+    return 0;
 }
 
 static const char*
@@ -1058,25 +1086,19 @@ pcsc_asimcard_cmd( ASimCard  sim, const char*  cmd )
     }
 
     // close logical channel:
-    if ( sscanf(cmd, "+CCHC=%d", &hChannel) == 1 ) {
-        long rv;
-        DWORD len;
+    if (sscanf(cmd, "+CCHC=%d", &hChannel) == 1) {
 
         iChannel = hChannel - H_CHANNEL_OFFSET;
         if(iChannel <= 0  || iChannel >= MAX_N_CHANNELS)
+        {
             return "+CME ERROR: INCORRECT PARAMETERS";
+        }
 
-        memcpy(bSendBuffer, "\x00\x70\x80\x00\x00", 5);
-        bSendBuffer[3] = iChannel;
-
-        len = sizeof(bRecvBuffer);
-        rv = SCardTransmit(sim->hCard, &pioSendPci, bSendBuffer, 5,
-                NULL, bRecvBuffer, &len);
-        if((rv == SCARD_S_SUCCESS) && (len == 2) &&
-                (bRecvBuffer[0] == 0x90) && (bRecvBuffer[1] == 0x00))
-            return NULL;
-
-        return "+CME ERROR: SIM FAILURE";
+        if (pcsc_asimcard_close_logical_channel(sim, iChannel) != 0)
+        {
+            return "+CME ERROR: SIM FAILURE";
+        }
+        return NULL;
     }
 
     // get ATR :
