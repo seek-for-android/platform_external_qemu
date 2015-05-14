@@ -31,7 +31,7 @@ CharDriverState*  android_modem_cs;
 typedef struct {
     CharDriverState*  cs;
     AModem            modem;
-    char              in_buff[ 1024 ];
+    char              in_buff[ 8 * 0xFFFF ];
     int               in_pos;
     int               in_sms;
 } ModemDriver;

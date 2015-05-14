@@ -88,7 +88,7 @@ static int _amodem_set_cdma_prl_version( AModem modem, int prlVersion);
 #if DEBUG
 static const char*  quote( const char*  line )
 {
-    static char  temp[1024];
+    static char  temp[8 * 0xFFFF];
     const char*  hexdigits = "0123456789abcdef";
     char*        p = temp;
     int          c;
@@ -274,7 +274,7 @@ typedef struct AModemRec_
     SmsReceiver         sms_receiver;
 
     int                 out_size;
-    char                out_buff[1024];
+    char                out_buff[8 * 0xFFFF];
 
     /*
      * Hold non-volatile ram configuration for modem
