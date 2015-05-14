@@ -748,8 +748,23 @@ asimcard_str_to_bytearray( unsigned char b[], char *s )
     }
 }
 
+static int
+asimcard_get_channel_number(unsigned char cla)
+{
+    if ((cla & 0x40) == 0x00)
+    {
+        // If b7 = 0, b2b1 encode channel number form 0 to 3
+        return cla & 0x03;
+    }
+    else
+    {
+        // If b7 = 1, b4b3b2b1  encode channel number form 4 to 19
+        return (cla & 0x0F) + 4;
+    }
+}
+
 static bool
-pcsc_asimcard_is_extended_length_apdu(unsigned char* cmdApdu, int cmdApduLength)
+asimcard_is_extended_length_apdu(unsigned char* cmdApdu, int cmdApduLength)
 {
     return cmdApduLength > 5 && cmdApdu[4] == 0x00;
 }
@@ -766,7 +781,7 @@ pcsc_asimcard_transcieve_apdu(
     long rc;
     unsigned char sw1, sw2;
 
-    if (!pcsc_asimcard_is_extended_length_apdu(cmdApdu, cmdLength))
+    if (!asimcard_is_extended_length_apdu(cmdApdu, cmdLength))
     {
         memcpy(bSendBuffer, cmdApdu, cmdLength);
         len = sizeof(bRecvBuffer);
@@ -779,8 +794,15 @@ pcsc_asimcard_transcieve_apdu(
     else
     {
         // Send extended length APDU, wrap APDU in ENVELOPE commands
-        // TODO: channel number should be demasked from original cmd to form CLA byte
-        bSendBuffer[0] = cmdApdu[0];
+        int channel_number = asimcard_get_channel_number(cmdApdu[0]);
+        if (channel_number < 4)
+        {
+            bSendBuffer[0] = 0x00 | channel_number;
+        }
+        else
+        {
+            bSendBuffer[0] = 0x40 | (channel_number - 4);
+        }
         memcpy(&bSendBuffer[1], "\xC2\x00\x00", 3);
         int remainingBytes = cmdLength;
         while (remainingBytes > 0)
