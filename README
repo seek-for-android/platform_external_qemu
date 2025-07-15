@@ -1,3 +1,9 @@
+! CAUTION !
+
+This repository has been archived. The code is outdated and no longer maintained.
+---------------------------------------------------------------------------------
+
+
 This directory contains the sources of the Android emulator,
 a QEMU-based program to emulate virtual devices running various
 releases of the Android platform image.
